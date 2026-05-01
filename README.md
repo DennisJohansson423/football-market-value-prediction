@@ -131,8 +131,6 @@ src/
   models.py
 notebooks/
   analysis.ipynb
-docs/
-  project-plan.md
 ```
 
 ---
