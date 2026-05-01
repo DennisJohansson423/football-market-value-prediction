@@ -153,7 +153,7 @@ def build_crosswalk(api_players: list[dict], tm_players: pd.DataFrame) -> pd.Dat
         candidates = tm_by_dob.get(row.dob_str, [])
         if candidates:
             best, score, _ = process.extractOne(
-                row.full_name_norm, candidates, scorer=fuzz.token_sort_ratio
+                row.full_name_norm, candidates, scorer=fuzz.token_set_ratio
             )
             if score >= _FUZZY_THRESHOLD:
                 tm_id = tm_id_by_dob_name[(row.dob_str, best)]
