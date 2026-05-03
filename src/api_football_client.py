@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://v3.football.api-sports.io"
 _PL_LEAGUE_ID = 39
-_REQUEST_DELAY = 2.0  # seconds between live requests; free tier rate-limits at ~30 req/min
+_REQUEST_DELAY = 7.0  # seconds between live requests; free tier hard-limits at 10 req/min
 _RETRY_WAIT = 60.0   # seconds to wait after a 429 before retrying
 
 # All PL team IDs across the 2022/23, 2023/24 and 2024/25 seasons.
@@ -73,7 +73,6 @@ class ApiFootballClient:
         total_pages: int = min(first.get("paging", {}).get("total", 1), 3)  # free tier cap
         players: list[dict[str, Any]] = list(first.get("response", []))
         for page in range(2, total_pages + 1):
-            time.sleep(_REQUEST_DELAY)
             data = self.get_players_by_team(team_id, season, page=page)
             players.extend(data.get("response", []))
         return players
@@ -98,8 +97,6 @@ class ApiFootballClient:
                 len(pl_players),
                 len(all_players),
             )
-            if i < len(teams) - 1:
-                time.sleep(_REQUEST_DELAY)
         return all_players
 
     # ------------------------------------------------------------------
@@ -124,6 +121,7 @@ class ApiFootballClient:
 
         url = f"{_BASE_URL}/{endpoint}"
         logger.info("fetching   %s  params=%s", url, params)
+        time.sleep(_REQUEST_DELAY)
         for attempt in range(3):
             resp = requests.get(url, headers=self._headers, params=params, timeout=30)
             if resp.status_code == 429:

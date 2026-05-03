@@ -62,6 +62,8 @@ src/ingest.py     — load API-Football (cached) + Transfermarkt CSVs
 src/join.py       — match players across sources by name + date of birth
 src/features.py   — build Stage 1 / 2 / 3 feature sets
 src/models.py     — train Linear, Ridge, Random Forest, XGBoost
+src/evaluate.py   — SHAP feature importance + transfer fee benchmarking
+src/predict.py    — interactive terminal tool for player lookups
 ```
 
 Run each module from the repo root:
@@ -71,6 +73,12 @@ uv run python -m src.ingest
 uv run python -m src.join
 uv run python -m src.features
 uv run python -m src.models
+```
+
+Look up a player's predicted value from the terminal:
+
+```bash
+uv run python -m src.predict
 ```
 
 Or run everything interactively in the notebook:
@@ -103,15 +111,21 @@ Mirroring the three-stage design from the reference paper:
 
 ---
 
-## Key results (2022/23 season, 5-fold CV)
+## Key results
 
-| Model | R² (Stage 1) | MAE |
-|---|---|---|
-| Random Forest | 0.67 | €7M |
-| XGBoost | 0.67 | €7M |
-| Ridge | 0.45 | €8M |
+Temporal split: train on 2022/23 + 2023/24, test on 2024/25 (561 player-seasons).
 
-The reference paper reports R² > 0.80 using multi-season data. Results are expected to improve once 2023/24 and 2024/25 seasons are added.
+| Model | Stage | R² | MAE |
+|---|---|---|---|
+| XGBoost | Stage 3 | 0.60 | €7M |
+| Random Forest | Stage 3 | 0.57 | €8M |
+| XGBoost | Stage 1 | 0.50 | €8M |
+| Random Forest | Stage 1 | 0.49 | €8M |
+| Ridge | Stage 1 | 0.38 | €13M |
+
+The reference paper reports R² > 0.80 using 24,000+ player-seasons across multiple European leagues. Our lower R² is expected given the smaller dataset (PL only, 3 seasons).
+
+**Transfer fee benchmark** (90 matched transfers, 2025/26 window): Transfermarkt MAE €7.6M vs model MAE €24.9M. TM wins — consistent with the finding that transfer fees reflect factors beyond on-field performance (contract status, hype, club finances). The model is better interpreted as a performance-based floor value.
 
 ---
 
@@ -129,6 +143,8 @@ src/
   join.py
   features.py
   models.py
+  evaluate.py
+  predict.py
 notebooks/
   analysis.ipynb
 ```
