@@ -125,7 +125,7 @@ Temporal split: train on 2022/23 + 2023/24, test on 2024/25 (561 player-seasons)
 
 The reference paper reports R² > 0.80 using 24,000+ player-seasons across multiple European leagues. Our lower R² is expected given the smaller dataset (PL only, 3 seasons).
 
-**Transfer fee benchmark** (90 matched transfers, 2025/26 window): Transfermarkt MAE €7.6M vs model MAE €24.9M. TM wins — consistent with the finding that transfer fees reflect factors beyond on-field performance (contract status, hype, club finances). The model is better interpreted as a performance-based floor value.
+**Transfer fee benchmark** (90 matched transfers, 2025/26 window): Transfermarkt MAE €7.6M vs model MAE €12.9M. TM wins — consistent with the finding that transfer fees reflect factors beyond on-field performance (contract status, hype, club finances). The model is better interpreted as a performance-based floor value.
 
 ---
 
