@@ -50,7 +50,6 @@ data/raw/transfermarkt/
   player_valuations.csv
   clubs.csv
   transfers.csv
-  appearances.csv
 ```
 
 ---
