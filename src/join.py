@@ -81,6 +81,7 @@ def api_players_to_df(api_players: list[dict]) -> pd.DataFrame:
                     # fouls
                     "fouls_drawn": stat["fouls"].get("drawn"),
                     "fouls_committed": stat["fouls"].get("committed"),
+                    "league_id": rec.get("_league_id"),
                 }
             )
     df = pd.DataFrame(rows)

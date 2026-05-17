@@ -146,6 +146,54 @@ def build_stage2(joined: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def build_stage4(joined: pd.DataFrame) -> pd.DataFrame:
+    """Stage 4: Stage 3 + goal involvement p90, defensive actions p90, minutes/app, team quality, league."""
+    df = build_stage3(joined)
+
+    agg = _aggregate_multi_club(joined)
+    p90 = agg["minutes"].replace(0, np.nan) / 90
+
+    agg["goal_involvement_p90"] = (agg["goals"] + agg["assists"]) / p90
+    agg["defensive_actions_p90"] = (agg["tackles"] + agg["interceptions"] + agg["blocks"]) / p90
+    agg["minutes_per_app"] = agg["minutes"] / agg["appearances"].replace(0, np.nan)
+
+    new_cols = ["goal_involvement_p90", "defensive_actions_p90", "minutes_per_app"]
+
+    # Team quality: avg market value of all players in same team-season
+    if "team_id" in joined.columns:
+        team_avg = (
+            joined.groupby(["team_id", "season"])["market_value_in_eur"]
+            .mean()
+            .reset_index(name="team_avg_value")
+        )
+        primary_team = (
+            joined.sort_values("minutes", ascending=False)
+            .drop_duplicates(["api_player_id", "season"])[["api_player_id", "season", "team_id"]]
+        )
+        agg = agg.merge(primary_team, on=["api_player_id", "season"], how="left")
+        agg = agg.merge(team_avg, on=["team_id", "season"], how="left")
+        agg["log_team_avg_value"] = np.log1p(agg["team_avg_value"])
+        new_cols.append("log_team_avg_value")
+
+    # League encoding
+    if "league_id" in joined.columns:
+        league_info = (
+            joined.sort_values("minutes", ascending=False)
+            .drop_duplicates(["api_player_id", "season"])[["api_player_id", "season", "league_id"]]
+        )
+        agg = agg.merge(league_info, on=["api_player_id", "season"], how="left")
+        league_dummies = pd.get_dummies(agg["league_id"].astype("Int64").astype(str), prefix="league", dtype=float)
+        agg = pd.concat([agg.reset_index(drop=True), league_dummies.reset_index(drop=True)], axis=1)
+        new_cols += [c for c in agg.columns if c.startswith("league_")]
+
+    df = df.merge(agg[["api_player_id", "season"] + new_cols], on=["api_player_id", "season"], how="left")
+
+    n_feat = len([c for c in df.columns if c not in
+                  {"api_player_id", "season", "tm_player_id", "market_value_in_eur", "log_market_value"}])
+    logger.info("Stage 4: %d player-seasons, %d features", len(df), n_feat)
+    return df
+
+
 def build_stage3(joined: pd.DataFrame, tm_valuations: pd.DataFrame | None = None) -> pd.DataFrame:
     """Stage 3: Stage 2 + age², position percentiles, avg squad value, Δ-stats (multi-season only)."""
     df = build_stage2(joined)
