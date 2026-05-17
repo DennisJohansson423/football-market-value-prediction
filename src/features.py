@@ -19,6 +19,7 @@ _SUM_COLS = [
     "duels_total", "duels_won",
     "dribbles_attempts", "dribbles_success",
     "fouls_drawn", "fouls_committed",
+    "penalty_goals",
 ]
 
 _POSITION_MAP = {
@@ -61,9 +62,21 @@ def _aggregate_multi_club(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index(name="passes_accuracy")
     )
 
+    # rating: weighted average by minutes (null-safe)
+    df["rating_weighted"] = df["rating"] * df["minutes"]
+    rating_agg = (
+        df.groupby(["api_player_id", "season"])
+        .apply(
+            lambda g: g["rating_weighted"].sum() / g["minutes"].sum()
+            if g["minutes"].sum() > 0 and g["rating_weighted"].notna().any() else np.nan,
+            include_groups=False,
+        )
+        .reset_index(name="rating")
+    )
+
     result = meta.merge(sums, on=["api_player_id", "season"]).merge(
         acc, on=["api_player_id", "season"]
-    )
+    ).merge(rating_agg, on=["api_player_id", "season"])
     return result
 
 
@@ -109,14 +122,17 @@ def build_stage1(joined: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_stage2(joined: pd.DataFrame) -> pd.DataFrame:
-    """Stage 2: Stage 1 + per-90 stats, passing, shooting, dribbling, defending."""
+    """Stage 2: Stage 1 + per-90 stats, passing, shooting, dribbling, defending, rating, np_goals."""
     df = _aggregate_multi_club(joined)
     df = _add_age(df)
     df = _normalize_position(df)
 
+    # Non-penalty goals: remove penalties to get a purer scoring measure
+    df["np_goals"] = (df["goals"] - df["penalty_goals"].fillna(0)).clip(lower=0)
+
     # Per-90 stats — guard against zero minutes
     p90 = df["minutes"].replace(0, np.nan) / 90
-    for col in ["goals", "assists", "shots_total", "shots_on", "passes_total", "passes_key",
+    for col in ["goals", "np_goals", "assists", "shots_total", "shots_on", "passes_total", "passes_key",
                 "tackles", "interceptions", "dribbles_attempts", "dribbles_success",
                 "fouls_drawn", "fouls_committed"]:
         df[f"{col}_p90"] = df[col] / p90
@@ -128,7 +144,9 @@ def build_stage2(joined: pd.DataFrame) -> pd.DataFrame:
     base_cols = ["age", "minutes", "appearances"]
     p90_cols = [c for c in df.columns if c.endswith("_p90")]
     rate_cols = ["passes_accuracy", "duels_won_pct", "shot_accuracy", "dribble_success_pct"]
-    feature_cols = base_cols + p90_cols + rate_cols
+    # rating: API overall performance score (weighted avg by minutes; ~53% coverage, rest NaN-filled)
+    quality_cols = ["rating"] if "rating" in df.columns else []
+    feature_cols = base_cols + p90_cols + rate_cols + quality_cols
 
     position_dummies = pd.get_dummies(df["position_group"], prefix="pos", dtype=float)
 

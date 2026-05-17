@@ -81,6 +81,9 @@ def api_players_to_df(api_players: list[dict]) -> pd.DataFrame:
                     # fouls
                     "fouls_drawn": stat["fouls"].get("drawn"),
                     "fouls_committed": stat["fouls"].get("committed"),
+                    # rating / penalty
+                    "rating": float(stat["games"]["rating"]) if stat["games"].get("rating") is not None else None,
+                    "penalty_goals": stat["penalty"].get("scored"),
                     "league_id": rec.get("_league_id"),
                 }
             )

@@ -97,7 +97,7 @@ Five progressive feature sets, each building on the previous:
 | Stage | Features | Count |
 |---|---|---|
 | **Stage 1** — Basic | Age, position (DEF/MID/FWD), minutes, appearances, goals, assists, cards | ~10 |
-| **Stage 2** — Expanded | Stage 1 + per-90 stats, pass accuracy, shot accuracy, dribble %, duels won % | ~22 |
+| **Stage 2** — Expanded | Stage 1 + per-90 stats, pass accuracy, shot accuracy, dribble %, duels won %, non-penalty goals (`np_goals`/`np_goals_p90`), API performance `rating` | ~24 |
 | **Stage 3** — Domain | Stage 2 + age², position-relative percentile ranks, Δ-stats vs previous season | ~29 |
 | **Stage 4** — Context | Stage 3 + goal involvement p90, defensive actions p90, minutes per appearance, **team quality** (`log_team_avg_value`), league dummies | ~39 |
 | **Stage 5** — Age curve | Stage 4 + position-specific peak age distance (`age_vs_pos_peak`), sell-on proxy (`years_to_30`), young player flag, age × goal involvement interaction, age × minutes interaction | ~44 |
