@@ -146,6 +146,49 @@ def build_stage2(joined: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def build_stage5(joined: pd.DataFrame) -> pd.DataFrame:
+    """Stage 5: Stage 4 + position-specific age curve, sell-on value proxy, age interactions.
+
+    Key insight: market value reflects *future potential* as much as current output.
+    A 21-year-old scoring 10 goals is worth far more than a 33-year-old with the same
+    stats. These features make that explicit for the model.
+    """
+    df = build_stage4(joined)
+
+    # Recover position group from dummies
+    pos_cols = [c for c in df.columns if c.startswith("pos_")]
+    df["_pos"] = df[pos_cols].idxmax(axis=1).str.replace("pos_", "")
+
+    # Signed distance from position-specific peak age
+    # (negative = still improving, positive = past prime)
+    # Based on sports science literature: FWD peak ~25, MID ~27, DEF ~28
+    peak_age_map = {"DEF": 28.0, "MID": 27.0, "FWD": 25.0}
+    pos_peak = df["_pos"].map(peak_age_map).fillna(26.0)
+    df["age_vs_pos_peak"] = df["age"] - pos_peak
+
+    # Sell-on value proxy: remaining years before age 30, clipped at 0
+    # Buyers pay a premium for young players they can develop and resell
+    df["years_to_30"] = (30.0 - df["age"]).clip(lower=0)
+
+    # Young player flag (under 23 = likely still in development phase)
+    df["is_young"] = (df["age"] < 23).astype(float)
+
+    # Age × goal involvement interaction
+    # A young high-scorer signals potential; an old high-scorer signals current form only
+    if "goal_involvement_p90" in df.columns:
+        df["age_x_goal_inv"] = df["age"] * df["goal_involvement_p90"].fillna(0)
+
+    # Age × minutes interaction: young player with high minutes = trusted breakout
+    df["age_x_minutes"] = df["age"] * df["minutes"].fillna(0)
+
+    df = df.drop(columns=["_pos"])
+
+    n_feat = len([c for c in df.columns if c not in
+                  {"api_player_id", "season", "tm_player_id", "market_value_in_eur", "log_market_value"}])
+    logger.info("Stage 5: %d player-seasons, %d features", len(df), n_feat)
+    return df
+
+
 def build_stage4(joined: pd.DataFrame) -> pd.DataFrame:
     """Stage 4: Stage 3 + goal involvement p90, defensive actions p90, minutes/app, team quality, league."""
     df = build_stage3(joined)
