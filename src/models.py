@@ -10,7 +10,8 @@ import pandas as pd
 from scipy.stats import spearmanr
 from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import cross_val_predict, KFold, GroupShuffleSplit
+from sklearn.base import clone
+from sklearn.model_selection import cross_val_predict, KFold, RandomizedSearchCV
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
@@ -55,6 +56,44 @@ def _metrics(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> dict:
                 spearman_log=spearman_log, rmse_eur=rmse_eur, mae_eur=mae_eur)
 
 
+_PARAM_GRIDS: dict[str, dict] = {
+    "RandomForest": {
+        "max_depth": [6, 8, 10, None],
+        "min_samples_leaf": [2, 3, 5],
+        "max_features": [0.5, 0.7, "sqrt"],
+    },
+    "XGBoost": {
+        "max_depth": [3, 4, 5, 6],
+        "learning_rate": [0.03, 0.05, 0.1],
+        "subsample": [0.7, 0.8, 0.9],
+        "colsample_bytree": [0.7, 0.8],
+    },
+}
+
+
+def _tune(name: str, model, X: np.ndarray, y: np.ndarray) -> any:
+    """Randomized CV search on training data; returns best estimator.
+
+    Only runs for models that have an entry in _PARAM_GRIDS.
+    """
+    grid = _PARAM_GRIDS.get(name)
+    if grid is None:
+        return model
+    base = clone(model)
+    try:
+        base.set_params(n_jobs=1)  # let the outer search handle parallelism
+    except ValueError:
+        pass
+    cv = KFold(n_splits=3, shuffle=True, random_state=_RANDOM_STATE)
+    search = RandomizedSearchCV(
+        base, grid, n_iter=10, cv=cv, scoring="r2",
+        random_state=_RANDOM_STATE, n_jobs=-1, refit=True,
+    )
+    search.fit(X, y)
+    logger.info("    tuned %s: %s  (CV R²=%.3f)", name, search.best_params_, search.best_score_)
+    return search.best_estimator_
+
+
 def _make_models() -> dict[str, any]:
     return {
         "LinearRegression": Pipeline([
@@ -89,8 +128,11 @@ def _temporal_split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     return df[df["season"] < test_season].copy(), df[df["season"] == test_season].copy()
 
 
-def train_global(df: pd.DataFrame, stage: str) -> list[ModelResult]:
-    """Train one model on all positions combined."""
+def train_global(df: pd.DataFrame, stage: str, tune: bool = True) -> list[ModelResult]:
+    """Train one model on all positions combined.
+
+    tune: if True, run RandomizedSearchCV on the training split for RF and XGBoost.
+    """
     feature_cols = [c for c in df.columns if c not in _DROP_COLS]
     X = df[feature_cols].fillna(0).values
     y = df["log_market_value"].values
@@ -103,6 +145,8 @@ def train_global(df: pd.DataFrame, stage: str) -> list[ModelResult]:
             y_tr = train["log_market_value"].values
             X_te = test[feature_cols].fillna(0).values
             y_te = test["log_market_value"].values
+            if tune:
+                model = _tune(name, model, X_tr, y_tr)
             model.fit(X_tr, y_tr)
             y_pred = model.predict(X_te)
             m = _metrics(y_te, y_pred)
@@ -120,7 +164,7 @@ def train_global(df: pd.DataFrame, stage: str) -> list[ModelResult]:
     return results
 
 
-def train_position_aware(df: pd.DataFrame, stage: str) -> list[ModelResult]:
+def train_position_aware(df: pd.DataFrame, stage: str, tune: bool = True) -> list[ModelResult]:
     """Train separate models per position group (DEF / MID / FWD)."""
     pos_cols = [c for c in df.columns if c.startswith("pos_")]
     if not pos_cols:
@@ -149,6 +193,8 @@ def train_position_aware(df: pd.DataFrame, stage: str) -> list[ModelResult]:
                 y_tr = train["log_market_value"].values
                 X_te = test[feature_cols].fillna(0).values
                 y_te = test["log_market_value"].values
+                if tune:
+                    model = _tune(name, model, X_tr, y_tr)
                 model.fit(X_tr, y_tr)
                 y_pred = model.predict(X_te)
                 m = _metrics(y_te, y_pred)
