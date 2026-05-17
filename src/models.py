@@ -212,6 +212,70 @@ def train_position_aware(df: pd.DataFrame, stage: str, tune: bool = True) -> lis
     return results
 
 
+def train_stacked(df: pd.DataFrame, stage: str, tune: bool = True) -> list[ModelResult]:
+    """Stacked ensemble: RF + XGBoost base models with Ridge meta-learner.
+
+    Base models produce out-of-fold predictions on the training set; the Ridge
+    meta-learner learns the optimal blend. No leakage: meta-learner only sees
+    OOF predictions, never the raw features.
+    """
+    if df["season"].nunique() < 2:
+        logger.warning("Stacking requires ≥2 seasons; skipping.")
+        return []
+
+    pos_cols = [c for c in df.columns if c.startswith("pos_")]
+    df = df.copy()
+    df["position_group"] = df[pos_cols].idxmax(axis=1).str.replace("pos_", "") if pos_cols else "global"
+
+    results = []
+    configs = [("global", df)] + [
+        (pos, df[df["position_group"] == pos].copy())
+        for pos in ["DEF", "MID", "FWD"]
+    ]
+
+    for pos_label, subset in configs:
+        feat_excl = _DROP_COLS | {"position_group"}
+        feature_cols = [c for c in subset.columns if c not in feat_excl]
+        if len(subset) < 30:
+            continue
+
+        train, test = _temporal_split(subset)
+        X_tr = train[feature_cols].fillna(0).values
+        y_tr = train["log_market_value"].values
+        X_te = test[feature_cols].fillna(0).values
+        y_te = test["log_market_value"].values
+
+        models_dict = _make_models()
+        rf = models_dict["RandomForest"]
+        xgb = models_dict["XGBoost"]
+
+        if tune:
+            rf = _tune("RandomForest", rf, X_tr, y_tr)
+            xgb = _tune("XGBoost", xgb, X_tr, y_tr)
+
+        # Out-of-fold predictions for the meta-learner (no leakage)
+        cv = KFold(n_splits=5, shuffle=True, random_state=_RANDOM_STATE)
+        rf_oof  = cross_val_predict(rf,  X_tr, y_tr, cv=cv)
+        xgb_oof = cross_val_predict(xgb, X_tr, y_tr, cv=cv)
+
+        meta = Ridge(alpha=1.0)
+        meta.fit(np.column_stack([rf_oof, xgb_oof]), y_tr)
+
+        # Refit base models on full training data
+        rf.fit(X_tr, y_tr)
+        xgb.fit(X_tr, y_tr)
+
+        y_pred = meta.predict(np.column_stack([rf.predict(X_te), xgb.predict(X_te)]))
+        m = _metrics(y_te, y_pred)
+        res = ModelResult(model_name="Stacked(RF+XGB)", stage=stage, position=pos_label,
+                          n_samples=len(y_te), **m)
+        results.append(res)
+        logger.info("  [%s] Stacked(RF+XGB)  R²=%.3f  RMSE_log=%.3f  MAE_eur=€%.0fM",
+                    pos_label, res.r2_log, res.rmse_log, res.mae_eur / 1e6)
+
+    return results
+
+
 def results_to_df(results: list[ModelResult]) -> pd.DataFrame:
     return pd.DataFrame([
         {
