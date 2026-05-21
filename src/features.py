@@ -19,6 +19,7 @@ _SUM_COLS = [
     "duels_total", "duels_won",
     "dribbles_attempts", "dribbles_success",
     "fouls_drawn", "fouls_committed",
+    "penalty_goals",
 ]
 
 _POSITION_MAP = {
@@ -61,9 +62,21 @@ def _aggregate_multi_club(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index(name="passes_accuracy")
     )
 
+    # rating: weighted average by minutes (null-safe)
+    df["rating_weighted"] = df["rating"] * df["minutes"]
+    rating_agg = (
+        df.groupby(["api_player_id", "season"])
+        .apply(
+            lambda g: g["rating_weighted"].sum() / g["minutes"].sum()
+            if g["minutes"].sum() > 0 and g["rating_weighted"].notna().any() else np.nan,
+            include_groups=False,
+        )
+        .reset_index(name="rating")
+    )
+
     result = meta.merge(sums, on=["api_player_id", "season"]).merge(
         acc, on=["api_player_id", "season"]
-    )
+    ).merge(rating_agg, on=["api_player_id", "season"])
     return result
 
 
@@ -109,14 +122,17 @@ def build_stage1(joined: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_stage2(joined: pd.DataFrame) -> pd.DataFrame:
-    """Stage 2: Stage 1 + per-90 stats, passing, shooting, dribbling, defending."""
+    """Stage 2: Stage 1 + per-90 stats, passing, shooting, dribbling, defending, rating, np_goals."""
     df = _aggregate_multi_club(joined)
     df = _add_age(df)
     df = _normalize_position(df)
 
+    # Non-penalty goals: remove penalties to get a purer scoring measure
+    df["np_goals"] = (df["goals"] - df["penalty_goals"].fillna(0)).clip(lower=0)
+
     # Per-90 stats — guard against zero minutes
     p90 = df["minutes"].replace(0, np.nan) / 90
-    for col in ["goals", "assists", "shots_total", "shots_on", "passes_total", "passes_key",
+    for col in ["goals", "np_goals", "assists", "shots_total", "shots_on", "passes_total", "passes_key",
                 "tackles", "interceptions", "dribbles_attempts", "dribbles_success",
                 "fouls_drawn", "fouls_committed"]:
         df[f"{col}_p90"] = df[col] / p90
@@ -128,7 +144,9 @@ def build_stage2(joined: pd.DataFrame) -> pd.DataFrame:
     base_cols = ["age", "minutes", "appearances"]
     p90_cols = [c for c in df.columns if c.endswith("_p90")]
     rate_cols = ["passes_accuracy", "duels_won_pct", "shot_accuracy", "dribble_success_pct"]
-    feature_cols = base_cols + p90_cols + rate_cols
+    # rating: API overall performance score (weighted avg by minutes; ~53% coverage, rest NaN-filled)
+    quality_cols = ["rating"] if "rating" in df.columns else []
+    feature_cols = base_cols + p90_cols + rate_cols + quality_cols
 
     position_dummies = pd.get_dummies(df["position_group"], prefix="pos", dtype=float)
 
@@ -144,6 +162,97 @@ def build_stage2(joined: pd.DataFrame) -> pd.DataFrame:
     logger.info("Stage 2: %d player-seasons, %d features", len(result),
                 len(feature_cols) + len(position_dummies.columns))
     return result
+
+
+def build_stage5(joined: pd.DataFrame) -> pd.DataFrame:
+    """Stage 5: Stage 4 + position-specific age curve, sell-on value proxy, age interactions.
+
+    Key insight: market value reflects *future potential* as much as current output.
+    A 21-year-old scoring 10 goals is worth far more than a 33-year-old with the same
+    stats. These features make that explicit for the model.
+    """
+    df = build_stage4(joined)
+
+    # Recover position group from dummies
+    pos_cols = [c for c in df.columns if c.startswith("pos_")]
+    df["_pos"] = df[pos_cols].idxmax(axis=1).str.replace("pos_", "")
+
+    # Signed distance from position-specific peak age
+    # (negative = still improving, positive = past prime)
+    # Based on sports science literature: FWD peak ~25, MID ~27, DEF ~28
+    peak_age_map = {"DEF": 28.0, "MID": 27.0, "FWD": 25.0}
+    pos_peak = df["_pos"].map(peak_age_map).fillna(26.0)
+    df["age_vs_pos_peak"] = df["age"] - pos_peak
+
+    # Sell-on value proxy: remaining years before age 30, clipped at 0
+    # Buyers pay a premium for young players they can develop and resell
+    df["years_to_30"] = (30.0 - df["age"]).clip(lower=0)
+
+    # Young player flag (under 23 = likely still in development phase)
+    df["is_young"] = (df["age"] < 23).astype(float)
+
+    # Age × goal involvement interaction
+    # A young high-scorer signals potential; an old high-scorer signals current form only
+    if "goal_involvement_p90" in df.columns:
+        df["age_x_goal_inv"] = df["age"] * df["goal_involvement_p90"].fillna(0)
+
+    # Age × minutes interaction: young player with high minutes = trusted breakout
+    df["age_x_minutes"] = df["age"] * df["minutes"].fillna(0)
+
+    df = df.drop(columns=["_pos"])
+
+    n_feat = len([c for c in df.columns if c not in
+                  {"api_player_id", "season", "tm_player_id", "market_value_in_eur", "log_market_value"}])
+    logger.info("Stage 5: %d player-seasons, %d features", len(df), n_feat)
+    return df
+
+
+def build_stage4(joined: pd.DataFrame) -> pd.DataFrame:
+    """Stage 4: Stage 3 + goal involvement p90, defensive actions p90, minutes/app, team quality, league."""
+    df = build_stage3(joined)
+
+    agg = _aggregate_multi_club(joined)
+    p90 = agg["minutes"].replace(0, np.nan) / 90
+
+    agg["goal_involvement_p90"] = (agg["goals"] + agg["assists"]) / p90
+    agg["defensive_actions_p90"] = (agg["tackles"] + agg["interceptions"] + agg["blocks"]) / p90
+    agg["minutes_per_app"] = agg["minutes"] / agg["appearances"].replace(0, np.nan)
+
+    new_cols = ["goal_involvement_p90", "defensive_actions_p90", "minutes_per_app"]
+
+    # Team quality: avg market value of all players in same team-season
+    if "team_id" in joined.columns:
+        team_avg = (
+            joined.groupby(["team_id", "season"])["market_value_in_eur"]
+            .mean()
+            .reset_index(name="team_avg_value")
+        )
+        primary_team = (
+            joined.sort_values("minutes", ascending=False)
+            .drop_duplicates(["api_player_id", "season"])[["api_player_id", "season", "team_id"]]
+        )
+        agg = agg.merge(primary_team, on=["api_player_id", "season"], how="left")
+        agg = agg.merge(team_avg, on=["team_id", "season"], how="left")
+        agg["log_team_avg_value"] = np.log1p(agg["team_avg_value"])
+        new_cols.append("log_team_avg_value")
+
+    # League encoding
+    if "league_id" in joined.columns:
+        league_info = (
+            joined.sort_values("minutes", ascending=False)
+            .drop_duplicates(["api_player_id", "season"])[["api_player_id", "season", "league_id"]]
+        )
+        agg = agg.merge(league_info, on=["api_player_id", "season"], how="left")
+        league_dummies = pd.get_dummies(agg["league_id"].astype("Int64").astype(str), prefix="league", dtype=float)
+        agg = pd.concat([agg.reset_index(drop=True), league_dummies.reset_index(drop=True)], axis=1)
+        new_cols += [c for c in agg.columns if c.startswith("league_")]
+
+    df = df.merge(agg[["api_player_id", "season"] + new_cols], on=["api_player_id", "season"], how="left")
+
+    n_feat = len([c for c in df.columns if c not in
+                  {"api_player_id", "season", "tm_player_id", "market_value_in_eur", "log_market_value"}])
+    logger.info("Stage 4: %d player-seasons, %d features", len(df), n_feat)
+    return df
 
 
 def build_stage3(joined: pd.DataFrame, tm_valuations: pd.DataFrame | None = None) -> pd.DataFrame:
