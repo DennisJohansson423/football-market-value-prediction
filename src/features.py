@@ -256,8 +256,9 @@ def build_stage4(joined: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_stage3(joined: pd.DataFrame, tm_valuations: pd.DataFrame | None = None) -> pd.DataFrame:
-    """Stage 3: Stage 2 + age², position percentiles, TM value history, Δ-stats (multi-season).
+    """Stage 3: Stage 2 + age², position percentiles, avg squad value, TM value history, Δ-stats (multi-season)."""
 
+    """
     tm_valuations: raw player_valuations DataFrame from TransfermarktData.valuations.
     When provided, adds two no-leakage features derived from the valuation history:
       log_tm_prev_value — log of market value snapped to July 1 of the season-start year
@@ -275,7 +276,8 @@ def build_stage3(joined: pd.DataFrame, tm_valuations: pd.DataFrame | None = None
     # Position-relative percentile ranks for key stats
     for col in ["goals_p90", "assists_p90", "minutes"]:
         if col in df.columns:
-            df[f"{col}_pct"] = df.groupby("pos_FWD" if "pos_FWD" in df.columns else "season")[col].rank(pct=True)
+            grp_key = "pos_FWD" if "pos_FWD" in df.columns else "season"
+            df[f"{col}_pct"] = df.groupby(grp_key)[col].rank(pct=True)
 
     # Transfermarkt value-history features.
     # For season N (target = July 1 year N+1):
@@ -336,7 +338,9 @@ def build_stage3(joined: pd.DataFrame, tm_valuations: pd.DataFrame | None = None
         for col in ["delta_goals", "delta_assists", "delta_minutes"]:
             if col in agg.columns:
                 df = df.merge(
-                    agg[["api_player_id", "season", col]], on=["api_player_id", "season"], how="left"
+                    agg[["api_player_id", "season", col]],
+                    on=["api_player_id", "season"],
+                    how="left",
                 )
 
     logger.info("Stage 3: %d player-seasons, %d columns", len(df), len(df.columns))

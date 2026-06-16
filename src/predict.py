@@ -7,7 +7,6 @@ Run from repo root:
 from __future__ import annotations
 
 import logging
-import sys
 
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor

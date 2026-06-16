@@ -203,7 +203,9 @@ def build_joined_dataset(api_players: list[dict], tm: "TransfermarktData") -> pd
     crosswalk = build_crosswalk(api_players, tm.players)
 
     # Attach tm_player_id to each api row
-    api_df = api_df.merge(crosswalk[["api_player_id", "tm_player_id"]], on="api_player_id", how="left")
+    api_df = api_df.merge(
+        crosswalk[["api_player_id", "tm_player_id"]], on="api_player_id", how="left"
+    )
 
     # Exclude goalkeepers
     api_df = api_df[api_df["position"].str.lower() != "goalkeeper"]

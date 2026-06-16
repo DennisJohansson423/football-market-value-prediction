@@ -56,7 +56,9 @@ class ApiFootballClient:
         if not api_key:
             raise EnvironmentError("API_FOOTBALL_KEY not set in environment / .env")
         self._headers = {"x-apisports-key": api_key}
-        self._cache_dir = cache_dir or Path(__file__).parent.parent / "data" / "raw" / "api_football"
+        self._cache_dir = (
+            cache_dir or Path(__file__).parent.parent / "data" / "raw" / "api_football"
+        )
         self._cache_dir.mkdir(parents=True, exist_ok=True)
 
     def get_status(self) -> dict[str, Any]:
@@ -77,6 +79,12 @@ class ApiFootballClient:
             players.extend(data.get("response", []))
         return players
 
+    def get_all_players(
+        self, season: int, team_ids: list[int] | None = None
+    ) -> list[dict[str, Any]]:
+        """Fetch all PL players for *season* by querying each team individually.
+
+        Querying by team avoids the free-tier page-3 cap on the league endpoint.
     def get_teams_for_league(self, league_id: int, season: int) -> list[int]:
         """Return all team IDs for a league/season (result is cached)."""
         data = self._get("teams", {"league": league_id, "season": season})
@@ -143,7 +151,9 @@ class ApiFootballClient:
         for attempt in range(3):
             resp = requests.get(url, headers=self._headers, params=params, timeout=30)
             if resp.status_code == 429:
-                logger.warning("429 rate limit — waiting %.0fs (attempt %d/3)", _RETRY_WAIT, attempt + 1)
+                logger.warning(
+                    "429 rate limit — waiting %.0fs (attempt %d/3)", _RETRY_WAIT, attempt + 1
+                )
                 time.sleep(_RETRY_WAIT)
                 continue
             resp.raise_for_status()
