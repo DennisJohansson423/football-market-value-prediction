@@ -21,7 +21,7 @@ _PL_LEAGUE_ID = 39
 _REQUEST_DELAY = 7.0  # seconds between live requests; free tier hard-limits at 10 req/min
 _RETRY_WAIT = 60.0   # seconds to wait after a 429 before retrying
 
-# All PL team IDs across the 2022/23, 2023/24 and 2024/25 seasons.
+# Hardcoded PL team IDs — used as fallback to avoid an extra API call for the default league.
 PL_TEAM_IDS = [
     33,    # Manchester United
     34,    # Newcastle
@@ -85,20 +85,42 @@ class ApiFootballClient:
         """Fetch all PL players for *season* by querying each team individually.
 
         Querying by team avoids the free-tier page-3 cap on the league endpoint.
+    def get_teams_for_league(self, league_id: int, season: int) -> list[int]:
+        """Return all team IDs for a league/season (result is cached)."""
+        data = self._get("teams", {"league": league_id, "season": season})
+        return [t["team"]["id"] for t in data.get("response", [])]
+
+    def get_all_players(
+        self,
+        season: int,
+        league_id: int = _PL_LEAGUE_ID,
+        team_ids: list[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch all players for *season* in *league_id* by querying each team.
+
+        team_ids: override the auto-fetched list (useful for testing or PL which has a hardcoded list).
+        Each returned record gets '_league_id' set and its statistics filtered to the target league only.
         """
-        teams = team_ids or PL_TEAM_IDS
+        if team_ids is None:
+            # Use hardcoded list for PL to save one API call; fetch dynamically for other leagues.
+            team_ids = PL_TEAM_IDS if league_id == _PL_LEAGUE_ID else self.get_teams_for_league(league_id, season)
+
         all_players: list[dict[str, Any]] = []
-        for i, team_id in enumerate(teams):
+        for i, team_id in enumerate(team_ids):
             players = self.get_all_players_for_team(team_id, season)
-            # Keep only PL stats — a player can appear in multiple competitions
-            pl_players = [p for p in players if _has_pl_stats(p)]
-            all_players.extend(pl_players)
+            league_players = [p for p in players if _has_league_stats(p, league_id)]
+            for p in league_players:
+                # Trim statistics to this league only so downstream aggregation is correct.
+                p["statistics"] = [s for s in p["statistics"] if s["league"]["id"] == league_id]
+                p["_league_id"] = league_id
+            all_players.extend(league_players)
             logger.info(
-                "  [%d/%d] team %d — %d players (PL), %d total so far",
+                "  [%d/%d] team %d — %d players (league %d), %d total so far",
                 i + 1,
-                len(teams),
+                len(team_ids),
                 team_id,
-                len(pl_players),
+                len(league_players),
+                league_id,
                 len(all_players),
             )
         return all_players
@@ -148,6 +170,6 @@ class ApiFootballClient:
         return data
 
 
-def _has_pl_stats(player_rec: dict[str, Any]) -> bool:
-    """Return True if the player has at least one statistics entry for the PL."""
-    return any(s["league"]["id"] == _PL_LEAGUE_ID for s in player_rec.get("statistics", []))
+def _has_league_stats(player_rec: dict[str, Any], league_id: int) -> bool:
+    """Return True if the player has at least one statistics entry for the given league."""
+    return any(s["league"]["id"] == league_id for s in player_rec.get("statistics", []))

@@ -12,6 +12,10 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import KFold, cross_val_predict
+from sklearn.base import clone
+from sklearn.model_selection import cross_val_predict, KFold, RandomizedSearchCV
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
@@ -55,6 +59,44 @@ def _metrics(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> dict:
                 spearman_log=spearman_log, rmse_eur=rmse_eur, mae_eur=mae_eur)
 
 
+_PARAM_GRIDS: dict[str, dict] = {
+    "RandomForest": {
+        "max_depth": [6, 8, 10, None],
+        "min_samples_leaf": [2, 3, 5],
+        "max_features": [0.5, 0.7, "sqrt"],
+    },
+    "XGBoost": {
+        "max_depth": [3, 4, 5, 6],
+        "learning_rate": [0.03, 0.05, 0.1],
+        "subsample": [0.7, 0.8, 0.9],
+        "colsample_bytree": [0.7, 0.8],
+    },
+}
+
+
+def _tune(name: str, model, X: np.ndarray, y: np.ndarray) -> any:
+    """Randomized CV search on training data; returns best estimator.
+
+    Only runs for models that have an entry in _PARAM_GRIDS.
+    """
+    grid = _PARAM_GRIDS.get(name)
+    if grid is None:
+        return model
+    base = clone(model)
+    try:
+        base.set_params(n_jobs=1)  # let the outer search handle parallelism
+    except ValueError:
+        pass
+    cv = KFold(n_splits=3, shuffle=True, random_state=_RANDOM_STATE)
+    search = RandomizedSearchCV(
+        base, grid, n_iter=10, cv=cv, scoring="r2",
+        random_state=_RANDOM_STATE, n_jobs=-1, refit=True,
+    )
+    search.fit(X, y)
+    logger.info("    tuned %s: %s  (CV R²=%.3f)", name, search.best_params_, search.best_score_)
+    return search.best_estimator_
+
+
 def _make_models() -> dict[str, any]:
     return {
         "LinearRegression": Pipeline([
@@ -89,8 +131,11 @@ def _temporal_split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     return df[df["season"] < test_season].copy(), df[df["season"] == test_season].copy()
 
 
-def train_global(df: pd.DataFrame, stage: str) -> list[ModelResult]:
-    """Train one model on all positions combined."""
+def train_global(df: pd.DataFrame, stage: str, tune: bool = True) -> list[ModelResult]:
+    """Train one model on all positions combined.
+
+    tune: if True, run RandomizedSearchCV on the training split for RF and XGBoost.
+    """
     feature_cols = [c for c in df.columns if c not in _DROP_COLS]
     X = df[feature_cols].fillna(0).values
     y = df["log_market_value"].values
@@ -103,6 +148,8 @@ def train_global(df: pd.DataFrame, stage: str) -> list[ModelResult]:
             y_tr = train["log_market_value"].values
             X_te = test[feature_cols].fillna(0).values
             y_te = test["log_market_value"].values
+            if tune:
+                model = _tune(name, model, X_tr, y_tr)
             model.fit(X_tr, y_tr)
             y_pred = model.predict(X_te)
             m = _metrics(y_te, y_pred)
@@ -120,7 +167,7 @@ def train_global(df: pd.DataFrame, stage: str) -> list[ModelResult]:
     return results
 
 
-def train_position_aware(df: pd.DataFrame, stage: str) -> list[ModelResult]:
+def train_position_aware(df: pd.DataFrame, stage: str, tune: bool = True) -> list[ModelResult]:
     """Train separate models per position group (DEF / MID / FWD)."""
     pos_cols = [c for c in df.columns if c.startswith("pos_")]
     if not pos_cols:
@@ -149,6 +196,8 @@ def train_position_aware(df: pd.DataFrame, stage: str) -> list[ModelResult]:
                 y_tr = train["log_market_value"].values
                 X_te = test[feature_cols].fillna(0).values
                 y_te = test["log_market_value"].values
+                if tune:
+                    model = _tune(name, model, X_tr, y_tr)
                 model.fit(X_tr, y_tr)
                 y_pred = model.predict(X_te)
                 m = _metrics(y_te, y_pred)
@@ -163,6 +212,70 @@ def train_position_aware(df: pd.DataFrame, stage: str) -> list[ModelResult]:
             results.append(res)
             logger.info("  [%s] %s  R²=%.3f  RMSE_log=%.3f  MAE_eur=€%.0fM",
                         pos, name, res.r2_log, res.rmse_log, res.mae_eur / 1e6)
+    return results
+
+
+def train_stacked(df: pd.DataFrame, stage: str, tune: bool = True) -> list[ModelResult]:
+    """Stacked ensemble: RF + XGBoost base models with Ridge meta-learner.
+
+    Base models produce out-of-fold predictions on the training set; the Ridge
+    meta-learner learns the optimal blend. No leakage: meta-learner only sees
+    OOF predictions, never the raw features.
+    """
+    if df["season"].nunique() < 2:
+        logger.warning("Stacking requires ≥2 seasons; skipping.")
+        return []
+
+    pos_cols = [c for c in df.columns if c.startswith("pos_")]
+    df = df.copy()
+    df["position_group"] = df[pos_cols].idxmax(axis=1).str.replace("pos_", "") if pos_cols else "global"
+
+    results = []
+    configs = [("global", df)] + [
+        (pos, df[df["position_group"] == pos].copy())
+        for pos in ["DEF", "MID", "FWD"]
+    ]
+
+    for pos_label, subset in configs:
+        feat_excl = _DROP_COLS | {"position_group"}
+        feature_cols = [c for c in subset.columns if c not in feat_excl]
+        if len(subset) < 30:
+            continue
+
+        train, test = _temporal_split(subset)
+        X_tr = train[feature_cols].fillna(0).values
+        y_tr = train["log_market_value"].values
+        X_te = test[feature_cols].fillna(0).values
+        y_te = test["log_market_value"].values
+
+        models_dict = _make_models()
+        rf = models_dict["RandomForest"]
+        xgb = models_dict["XGBoost"]
+
+        if tune:
+            rf = _tune("RandomForest", rf, X_tr, y_tr)
+            xgb = _tune("XGBoost", xgb, X_tr, y_tr)
+
+        # Out-of-fold predictions for the meta-learner (no leakage)
+        cv = KFold(n_splits=5, shuffle=True, random_state=_RANDOM_STATE)
+        rf_oof  = cross_val_predict(rf,  X_tr, y_tr, cv=cv)
+        xgb_oof = cross_val_predict(xgb, X_tr, y_tr, cv=cv)
+
+        meta = Ridge(alpha=1.0)
+        meta.fit(np.column_stack([rf_oof, xgb_oof]), y_tr)
+
+        # Refit base models on full training data
+        rf.fit(X_tr, y_tr)
+        xgb.fit(X_tr, y_tr)
+
+        y_pred = meta.predict(np.column_stack([rf.predict(X_te), xgb.predict(X_te)]))
+        m = _metrics(y_te, y_pred)
+        res = ModelResult(model_name="Stacked(RF+XGB)", stage=stage, position=pos_label,
+                          n_samples=len(y_te), **m)
+        results.append(res)
+        logger.info("  [%s] Stacked(RF+XGB)  R²=%.3f  RMSE_log=%.3f  MAE_eur=€%.0fM",
+                    pos_label, res.r2_log, res.rmse_log, res.mae_eur / 1e6)
+
     return results
 
 
