@@ -147,7 +147,17 @@ def build_stage2(joined: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_stage3(joined: pd.DataFrame, tm_valuations: pd.DataFrame | None = None) -> pd.DataFrame:
-    """Stage 3: Stage 2 + age², position percentiles, avg squad value, Δ-stats (multi-season only)."""
+    """Stage 3: Stage 2 + age², position percentiles, TM value history, Δ-stats (multi-season).
+
+    tm_valuations: raw player_valuations DataFrame from TransfermarktData.valuations.
+    When provided, adds two no-leakage features derived from the valuation history:
+      log_tm_prev_value — log of market value snapped to July 1 of the season-start year
+                          (12 months before the target date), i.e. what the market
+                          already thought the player was worth entering this season.
+      tm_value_trend    — growth in log value from the year before that to season-start,
+                          capturing the momentum signal entering the season.
+    Both snap dates predate the target (July 1 year N+1) so there is no leakage.
+    """
     df = build_stage2(joined)
 
     # age²
@@ -158,10 +168,50 @@ def build_stage3(joined: pd.DataFrame, tm_valuations: pd.DataFrame | None = None
         if col in df.columns:
             df[f"{col}_pct"] = df.groupby("pos_FWD" if "pos_FWD" in df.columns else "season")[col].rank(pct=True)
 
-    # Average squad market value per team-season (proxy for team quality)
+    # Transfermarkt value-history features.
+    # For season N (target = July 1 year N+1):
+    #   offset 0  → snap to July 1 year N   (season-start, 12 months before target)
+    #   offset -1 → snap to July 1 year N-1 (two years before target, for trend baseline)
     if tm_valuations is not None:
-        # reuse the tm_player_id in joined to compute team avg market value
-        pass  # placeholder — requires team membership data; wired in later
+        vals = (
+            tm_valuations[["player_id", "date", "market_value_in_eur"]]
+            .rename(columns={"player_id": "tm_player_id"})
+            .dropna(subset=["tm_player_id", "date", "market_value_in_eur"])
+            .copy()
+        )
+        vals["date"] = pd.to_datetime(vals["date"])
+
+        ps = (
+            df[df["tm_player_id"].notna()][["api_player_id", "season", "tm_player_id"]]
+            .drop_duplicates(["api_player_id", "season"])
+            .copy()
+        )
+
+        for offset, out_col in [(0, "_tm_prev_eur"), (-1, "_tm_prev2_eur")]:
+            ps["_snap"] = ps["season"].apply(
+                lambda s, o=offset: pd.Timestamp(year=int(s) + o, month=7, day=1)
+            )
+            m = ps[["api_player_id", "season", "tm_player_id", "_snap"]].merge(
+                vals, on="tm_player_id", how="left"
+            )
+            m = m[m["date"] <= m["_snap"]]
+            if not m.empty:
+                m["_delta"] = (m["date"] - m["_snap"]).abs()
+                best = (
+                    m.loc[
+                        m.groupby(["api_player_id", "season"])["_delta"].idxmin(),
+                        ["api_player_id", "season", "market_value_in_eur"],
+                    ]
+                    .rename(columns={"market_value_in_eur": out_col})
+                )
+                df = df.merge(best, on=["api_player_id", "season"], how="left")
+            else:
+                df[out_col] = np.nan
+
+        df["log_tm_prev_value"] = np.log1p(df["_tm_prev_eur"])
+        if "_tm_prev2_eur" in df.columns:
+            df["tm_value_trend"] = df["log_tm_prev_value"] - np.log1p(df["_tm_prev2_eur"])
+        df = df.drop(columns=[c for c in ["_tm_prev_eur", "_tm_prev2_eur"] if c in df.columns])
 
     # Δ-stats: only meaningful once we have ≥2 seasons in the dataset
     if joined["season"].nunique() >= 2:
