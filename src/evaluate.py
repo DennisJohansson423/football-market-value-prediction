@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import logging
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import shap
 from sklearn.ensemble import RandomForestRegressor
 
@@ -103,7 +103,9 @@ def build_transfer_benchmark(
     fees = transfers.copy()
     fees = fees.rename(columns={"player_id": "tm_player_id"})
     fees["transfer_fee"] = pd.to_numeric(fees["transfer_fee"], errors="coerce").fillna(0)
-    fees["market_value_in_eur"] = pd.to_numeric(fees["market_value_in_eur"], errors="coerce").fillna(0)
+    fees["market_value_in_eur"] = (
+        pd.to_numeric(fees["market_value_in_eur"], errors="coerce").fillna(0)
+    )
     fees["transfer_date"] = pd.to_datetime(fees["transfer_date"], errors="coerce")
     fees["season_year"] = fees["transfer_season"].apply(_parse_season_year)
 

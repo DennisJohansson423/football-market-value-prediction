@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
-from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import cross_val_predict, KFold, GroupShuffleSplit
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import KFold, cross_val_predict
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
 
 logger = logging.getLogger(__name__)
@@ -182,9 +182,9 @@ def results_to_df(results: list[ModelResult]) -> pd.DataFrame:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
+    from src.features import build_stage1, build_stage2
     from src.ingest import fetch_api_football, load_transfermarkt
     from src.join import build_joined_dataset
-    from src.features import build_stage1, build_stage2
 
     tm = load_transfermarkt()
     api = fetch_api_football(seasons=[2022])

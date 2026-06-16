@@ -147,7 +147,7 @@ def build_stage2(joined: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_stage3(joined: pd.DataFrame, tm_valuations: pd.DataFrame | None = None) -> pd.DataFrame:
-    """Stage 3: Stage 2 + age², position percentiles, avg squad value, Δ-stats (multi-season only)."""
+    """Stage 3: Stage 2 + age², position percentiles, avg squad value, Δ-stats (multi-season)."""
     df = build_stage2(joined)
 
     # age²
@@ -156,7 +156,8 @@ def build_stage3(joined: pd.DataFrame, tm_valuations: pd.DataFrame | None = None
     # Position-relative percentile ranks for key stats
     for col in ["goals_p90", "assists_p90", "minutes"]:
         if col in df.columns:
-            df[f"{col}_pct"] = df.groupby("pos_FWD" if "pos_FWD" in df.columns else "season")[col].rank(pct=True)
+            grp_key = "pos_FWD" if "pos_FWD" in df.columns else "season"
+            df[f"{col}_pct"] = df.groupby(grp_key)[col].rank(pct=True)
 
     # Average squad market value per team-season (proxy for team quality)
     if tm_valuations is not None:
@@ -177,7 +178,9 @@ def build_stage3(joined: pd.DataFrame, tm_valuations: pd.DataFrame | None = None
         for col in ["delta_goals", "delta_assists", "delta_minutes"]:
             if col in agg.columns:
                 df = df.merge(
-                    agg[["api_player_id", "season", col]], on=["api_player_id", "season"], how="left"
+                    agg[["api_player_id", "season", col]],
+                    on=["api_player_id", "season"],
+                    how="left",
                 )
 
     logger.info("Stage 3: %d player-seasons, %d columns", len(df), len(df.columns))
